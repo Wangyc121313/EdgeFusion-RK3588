@@ -26,8 +26,17 @@ LIDAR_WINDOW_HALF_DEG="${LIDAR_WINDOW_HALF_DEG:-2.5}"
 LIDAR_MIN_DIST_M="${LIDAR_MIN_DIST_M:-0.15}"
 LIDAR_MAX_DIST_M="${LIDAR_MAX_DIST_M:-20.0}"
 LIDAR_MAX_AGE_MS="${LIDAR_MAX_AGE_MS:-120}"
-PUBLISH_MODE="${PUBLISH_MODE:-rtsp}"
+PUBLISH_MODE="${PUBLISH_MODE:-webrtc}"
 WEBRTC_URL="${WEBRTC_URL:-rtc://127.0.0.1:8000/live/camera}"
+START_DEBUG_UI="${START_DEBUG_UI:-1}"
+DEBUG_UI_HOST="${DEBUG_UI_HOST:-0.0.0.0}"
+DEBUG_UI_PORT="${DEBUG_UI_PORT:-8090}"
+DEBUG_UI_ZLM_HOST="${DEBUG_UI_ZLM_HOST:-127.0.0.1}"
+DEBUG_UI_LOG_PATH="${DEBUG_UI_LOG_PATH:-/tmp/rk3588_phasec_debug_ui.log}"
+DEBUG_UI_BIN="${DEBUG_UI_BIN:-$ROOT_DIR/build/webrtc_debug_ui_server}"
+
+export RK3588_WEBRTC_RTC_PORT="${RK3588_WEBRTC_RTC_PORT:-8000}"
+export RK3588_WEBRTC_HTTP_PORT="${RK3588_WEBRTC_HTTP_PORT:-8080}"
 
 export RK3588_DISTANCE_FUSION_MODE="${RK3588_DISTANCE_FUSION_MODE:-robust}"
 export RK3588_TRACKER_MIN_IOU="${RK3588_TRACKER_MIN_IOU:-0.08}"
@@ -47,8 +56,50 @@ RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="$OUT_ROOT/run_$RUN_TS"
 mkdir -p "$RUN_DIR"
 ln -sfn "run_$RUN_TS" "$OUT_ROOT/latest"
+TELEMETRY_LINK="$RUN_DIR/current_telemetry.jsonl"
 
 echo "[phasec] run_dir=$RUN_DIR"
+echo "[phasec] publish_mode=$PUBLISH_MODE"
+
+DEBUG_UI_PID=""
+cleanup() {
+  if [[ -n "$DEBUG_UI_PID" ]]; then
+    kill "$DEBUG_UI_PID" 2>/dev/null || true
+    wait "$DEBUG_UI_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ "$START_DEBUG_UI" == "1" ]]; then
+  if command -v ss >/dev/null 2>&1 && ss -ltnu | awk '{print $5}' | grep -Eq "[:.]${DEBUG_UI_PORT}$"; then
+    echo "[phasec] debug ui port ${DEBUG_UI_PORT} already in use, reuse existing service"
+  else
+    if [[ -x "$DEBUG_UI_BIN" ]]; then
+      nohup "$DEBUG_UI_BIN" \
+        --host "$DEBUG_UI_HOST" \
+        --port "$DEBUG_UI_PORT" \
+        --zlm-host "$DEBUG_UI_ZLM_HOST" \
+        --zlm-http-port "$RK3588_WEBRTC_HTTP_PORT" \
+        --telemetry-path "$TELEMETRY_LINK" \
+        --default-app live \
+        --default-stream camera \
+        >"$DEBUG_UI_LOG_PATH" 2>&1 &
+    else
+      nohup python3 "$ROOT_DIR/tools/webrtc_debug_ui/server.py" \
+        --host "$DEBUG_UI_HOST" \
+        --port "$DEBUG_UI_PORT" \
+        --zlm-host "$DEBUG_UI_ZLM_HOST" \
+        --zlm-http-port "$RK3588_WEBRTC_HTTP_PORT" \
+        --telemetry-path "$TELEMETRY_LINK" \
+        --default-app live \
+        --default-stream camera \
+        >"$DEBUG_UI_LOG_PATH" 2>&1 &
+    fi
+    DEBUG_UI_PID=$!
+    echo "[phasec] debug_ui=http://127.0.0.1:${DEBUG_UI_PORT}/?app=live&stream=camera"
+    echo "[phasec] debug_ui_log=$DEBUG_UI_LOG_PATH"
+  fi
+fi
 
 declare -A SCENE_DESC
 SCENE_DESC[static_target]="静止目标：目标固定不动，设备尽量保持静止"
@@ -64,6 +115,7 @@ for SCENE in "${SCENES[@]}"; do
   export RK3588_PSEUDO_LABEL_SEQUENCE_ID="${RUN_TS}_${SCENE}"
   export RK3588_PSEUDO_LABEL_PATH="$SCENE_DIR/pseudo_labels.jsonl"
   export RK3588_TELEMETRY_PATH="$SCENE_DIR/telemetry.jsonl"
+  ln -sfn "$SCENE_DIR/telemetry.jsonl" "$TELEMETRY_LINK"
   VIDEO_PATH="$SCENE_DIR/video.h264"
 
   {

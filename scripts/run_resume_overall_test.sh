@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run resume-oriented end-to-end benchmark:
-# 1) Three standard scenes (quality + latency metrics)
-# 2) Overall stress/performance rounds (throughput + resource metrics)
+# Run resume-oriented overall benchmark:
+# 1) Overall stress/performance rounds (throughput + resource metrics)
+# 2) Optionally run three standard scenes (quality + latency metrics)
 # 3) Merge to one resume summary file
 #
 # Usage:
@@ -24,6 +24,7 @@ PERF_ROUNDS="${PERF_ROUNDS:-2}"
 PHASE_OUT_ROOT="${PHASE_OUT_ROOT:-reports/phasec}"
 PERF_OUT_ROOT="${PERF_OUT_ROOT:-reports/perf}"
 RESUME_OUT_ROOT="${RESUME_OUT_ROOT:-reports/resume}"
+RUN_THREE_SCENES="${RUN_THREE_SCENES:-0}"
 
 mkdir -p "$RESUME_OUT_ROOT"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
@@ -33,22 +34,62 @@ ln -sfn "run_$RUN_TS" "$RESUME_OUT_ROOT/latest"
 
 echo "[resume_overall] start"
 echo "[resume_overall] output=$OVERALL_DIR"
-echo "[resume_overall] phase_seconds=$PHASE_SECONDS perf_duration_s=$PERF_DURATION_S perf_rounds=$PERF_ROUNDS"
+echo "[resume_overall] phase_seconds=$PHASE_SECONDS perf_duration_s=$PERF_DURATION_S perf_rounds=$PERF_ROUNDS run_three_scenes=$RUN_THREE_SCENES"
 
-scripts/run_resume_three_scenarios.sh \
-  "$CAMERA_DEVICE" \
-  "$CAMERA_WIDTH" \
-  "$CAMERA_HEIGHT" \
-  "$PHASE_SECONDS" \
-  "$PHASE_OUT_ROOT"
+PHASE_RUN_DIR=""
+PHASE_MD=""
+PHASE_JSON=""
+PHASE_SOURCE_MODE="skipped"
 
-PHASE_RUN_DIR="$(readlink -f "$PHASE_OUT_ROOT/latest")"
-PHASE_MD="$PHASE_RUN_DIR/resume_metrics_3scene.md"
-PHASE_JSON="$PHASE_RUN_DIR/resume_metrics_3scene.json"
-if [[ ! -f "$PHASE_JSON" ]]; then
-  echo "error: missing phase summary json: $PHASE_JSON"
-  exit 2
-fi
+case "${RUN_THREE_SCENES,,}" in
+    1|true|yes|on)
+        echo "[resume_overall] running three-scene suite before perf"
+        scripts/run_resume_three_scenarios.sh \
+            "$CAMERA_DEVICE" \
+            "$CAMERA_WIDTH" \
+            "$CAMERA_HEIGHT" \
+            "$PHASE_SECONDS" \
+            "$PHASE_OUT_ROOT"
+
+        PHASE_RUN_DIR="$(readlink -f "$PHASE_OUT_ROOT/latest")"
+        PHASE_MD="$PHASE_RUN_DIR/resume_metrics_3scene.md"
+        PHASE_JSON="$PHASE_RUN_DIR/resume_metrics_3scene.json"
+        if [[ ! -f "$PHASE_JSON" ]]; then
+            echo "error: missing phase summary json: $PHASE_JSON"
+            exit 2
+        fi
+        PHASE_SOURCE_MODE="fresh"
+        ;;
+    *)
+        if [[ -L "$PHASE_OUT_ROOT/latest" ]]; then
+            CANDIDATE_PHASE_RUN_DIR="$(readlink -f "$PHASE_OUT_ROOT/latest" || true)"
+            if [[ -n "${CANDIDATE_PHASE_RUN_DIR:-}" && -f "$CANDIDATE_PHASE_RUN_DIR/resume_metrics_3scene.json" ]]; then
+                PHASE_RUN_DIR="$CANDIDATE_PHASE_RUN_DIR"
+                PHASE_MD="$PHASE_RUN_DIR/resume_metrics_3scene.md"
+                PHASE_JSON="$PHASE_RUN_DIR/resume_metrics_3scene.json"
+                PHASE_SOURCE_MODE="reuse_latest"
+                echo "[resume_overall] reuse latest three-scene summary: $PHASE_RUN_DIR"
+            fi
+        fi
+
+        if [[ -z "$PHASE_JSON" ]]; then
+            PHASE_RUN_DIR="N/A (skipped)"
+            PHASE_JSON="$OVERALL_DIR/_phase_placeholder.json"
+            cat > "$PHASE_JSON" <<'JSON'
+{
+    "gate_status": "SKIPPED",
+    "total_frames": 0,
+    "avg_track_retention_ratio": null,
+    "worst_id_switch_proxy_rate": null,
+    "worst_track_fragmentation_rate": null,
+    "worst_latency_p95_ms": null
+}
+JSON
+            PHASE_SOURCE_MODE="skipped"
+            echo "[resume_overall] three-scene suite skipped (RUN_THREE_SCENES=$RUN_THREE_SCENES)"
+        fi
+        ;;
+esac
 
 scripts/perf_stress_suite.sh "$PERF_DURATION_S" "$PERF_ROUNDS" "$PERF_OUT_ROOT"
 PERF_RUN_DIR="$(readlink -f "$PERF_OUT_ROOT/latest")"
@@ -62,14 +103,14 @@ fi
 OVERALL_MD="$OVERALL_DIR/resume_overall_summary.md"
 OVERALL_JSON="$OVERALL_DIR/resume_overall_summary.json"
 
-python3 - "$PHASE_JSON" "$PERF_CSV" "$OVERALL_MD" "$OVERALL_JSON" "$PHASE_RUN_DIR" "$PERF_RUN_DIR" <<'PY'
+python3 - "$PHASE_JSON" "$PERF_CSV" "$OVERALL_MD" "$OVERALL_JSON" "$PHASE_RUN_DIR" "$PERF_RUN_DIR" "$PHASE_SOURCE_MODE" <<'PY'
 import csv
 import json
 import math
 import statistics
 import sys
 
-phase_json, perf_csv, md_path, json_path, phase_run_dir, perf_run_dir = sys.argv[1:7]
+phase_json, perf_csv, md_path, json_path, phase_run_dir, perf_run_dir, phase_source_mode = sys.argv[1:8]
 
 with open(phase_json, "r", encoding="utf-8") as f:
     phase = json.load(f)
@@ -116,6 +157,7 @@ success_rounds = sum(1 for x in exit_codes if x == 0.0)
 overall = {
     "phase_run_dir": phase_run_dir,
     "perf_run_dir": perf_run_dir,
+    "phase_source_mode": phase_source_mode,
     "scene_gate_status": phase.get("gate_status", "UNKNOWN"),
     "scene_total_frames": phase.get("total_frames", 0),
     "scene_avg_retention": phase.get("avg_track_retention_ratio"),
@@ -145,6 +187,12 @@ with open(json_path, "w", encoding="utf-8") as f:
 with open(md_path, "w", encoding="utf-8") as f:
     f.write("# 简历指标总摘要（场景质量 + 系统性能）\n\n")
     f.write("## 一、三场景质量指标\n\n")
+    if phase_source_mode == "fresh":
+        f.write("- 数据来源: 本次总测中重新执行三场景。\n")
+    elif phase_source_mode == "reuse_latest":
+        f.write("- 数据来源: 复用历史 latest 三场景结果（本次未重跑三场景）。\n")
+    else:
+        f.write("- 数据来源: 本次总测跳过三场景（仅整体压测）。\n")
     f.write(f"- Gate 验收: **{overall['scene_gate_status']}**\n")
     f.write(f"- 总样本帧数: {overall['scene_total_frames']}\n")
     f.write(f"- Track 保持率均值: {fmt(overall['scene_avg_retention'])}\n")
@@ -175,11 +223,16 @@ print(md_path)
 print(json_path)
 PY
 
-cp -f "$PHASE_MD" "$OVERALL_DIR/"
-cp -f "$PHASE_JSON" "$OVERALL_DIR/"
+if [[ "$PHASE_SOURCE_MODE" != "skipped" && -n "$PHASE_MD" && -f "$PHASE_MD" ]]; then
+    cp -f "$PHASE_MD" "$OVERALL_DIR/"
+fi
+if [[ "$PHASE_SOURCE_MODE" != "skipped" && -n "$PHASE_JSON" && -f "$PHASE_JSON" ]]; then
+    cp -f "$PHASE_JSON" "$OVERALL_DIR/"
+fi
 cp -f "$PERF_REPORT" "$OVERALL_DIR/perf_report.md"
 
 echo "[resume_overall] phase_run_dir=$PHASE_RUN_DIR"
+echo "[resume_overall] phase_source_mode=$PHASE_SOURCE_MODE"
 echo "[resume_overall] perf_run_dir=$PERF_RUN_DIR"
 echo "[resume_overall] summary_md=$OVERALL_MD"
 echo "[resume_overall] summary_json=$OVERALL_JSON"

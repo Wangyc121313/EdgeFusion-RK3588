@@ -423,6 +423,10 @@
       telemetryTimer: null,
       config: null,
       lastSnapshot: null,
+      reconnectTimer: null,
+      manualStop: false,
+      lastVideoTime: -1,
+      lastVideoWallTimeMs: 0,
     };
 
     const refs = {
@@ -453,6 +457,28 @@
     function setLog(text, warn = false) {
       refs.logBox.textContent = text;
       refs.logBox.classList.toggle('warn', warn);
+    }
+
+    function clearReconnectTimer() {
+      if (state.reconnectTimer) {
+        window.clearTimeout(state.reconnectTimer);
+        state.reconnectTimer = null;
+      }
+    }
+
+    function scheduleReconnect(reason, delayMs = 1500) {
+      if (state.manualStop) {
+        return;
+      }
+      if (state.reconnectTimer) {
+        return;
+      }
+      setStatus('reconnecting', true);
+      setLog(`连接中断，${delayMs}ms 后自动重连（${reason}）`, true);
+      state.reconnectTimer = window.setTimeout(() => {
+        state.reconnectTimer = null;
+        connect(true);
+      }, delayMs);
     }
 
     function formatRuntime(seconds) {
@@ -492,24 +518,50 @@
       refs.rtcUrlText.textContent = state.config.default_play_url.replace(/\/[^/]+\/[^/]+$/, `/${params.app}/${params.stream}`);
     }
 
-    async function connect() {
+    async function connect(auto = false) {
       updateQueryString();
-      disconnect(false);
+      state.manualStop = false;
+      clearReconnectTimer();
+      disconnect(false, false);
 
       const params = currentParams();
       const peer = new RTCPeerConnection();
       peer.addTransceiver('video', { direction: 'recvonly' });
       peer.ontrack = (event) => {
         refs.video.srcObject = event.streams[0];
+        state.lastVideoTime = -1;
+        state.lastVideoWallTimeMs = Date.now();
+        const [track] = event.streams[0]?.getVideoTracks?.() || [];
+        if (track) {
+          track.onended = () => {
+            scheduleReconnect('track ended', 800);
+          };
+        }
       };
       peer.onconnectionstatechange = () => {
-        setStatus(peer.connectionState || 'connecting', peer.connectionState === 'failed');
+        const cs = peer.connectionState || 'connecting';
+        if (cs === 'connected') {
+          setStatus('connected');
+          clearReconnectTimer();
+          return;
+        }
+        if (cs === 'failed' || cs === 'disconnected' || cs === 'closed') {
+          scheduleReconnect(`connection=${cs}`, cs === 'failed' ? 500 : 1200);
+          return;
+        }
+        setStatus(cs, cs === 'failed');
+      };
+      peer.oniceconnectionstatechange = () => {
+        const ics = peer.iceConnectionState;
+        if (ics === 'failed' || ics === 'disconnected' || ics === 'closed') {
+          scheduleReconnect(`ice=${ics}`, 900);
+        }
       };
       state.peer = peer;
 
       try {
         setStatus('connecting');
-        setLog('创建 offer 并向本地 debug UI 代理请求 answer。');
+        setLog(auto ? '自动重连：创建 offer 并请求 answer。' : '创建 offer 并向本地 debug UI 代理请求 answer。');
         const offer = await peer.createOffer();
         await peer.setLocalDescription(offer);
 
@@ -530,12 +582,18 @@
         console.error(error);
         setStatus('error', true);
         setLog(`连接失败: ${error.message}`, true);
-        disconnect(false);
+        disconnect(false, false);
+        scheduleReconnect('connect failed', 1500);
       }
     }
 
-    function disconnect(log = true) {
+    function disconnect(log = true, manual = true) {
+      if (manual) {
+        state.manualStop = true;
+      }
+      clearReconnectTimer();
       if (state.peer) {
+        state.peer.oniceconnectionstatechange = null;
         state.peer.ontrack = null;
         state.peer.onconnectionstatechange = null;
         state.peer.close();
@@ -545,6 +603,40 @@
       if (log) {
         setStatus('idle');
         setLog('连接已关闭。');
+      }
+    }
+
+    function monitorVideoStall() {
+      if (state.manualStop || !state.peer) {
+        return;
+      }
+
+      const stream = refs.video.srcObject;
+      if (!stream) {
+        return;
+      }
+
+      const cs = state.peer.connectionState;
+      if (cs !== 'connected') {
+        return;
+      }
+
+      const now = Date.now();
+      const currentTime = refs.video.currentTime || 0;
+      if (state.lastVideoTime < 0) {
+        state.lastVideoTime = currentTime;
+        state.lastVideoWallTimeMs = now;
+        return;
+      }
+
+      if (Math.abs(currentTime - state.lastVideoTime) > 0.01) {
+        state.lastVideoTime = currentTime;
+        state.lastVideoWallTimeMs = now;
+        return;
+      }
+
+      if (now - state.lastVideoWallTimeMs > 4500) {
+        scheduleReconnect('video stalled', 700);
       }
     }
 
@@ -713,6 +805,7 @@
         const payload = await response.json();
         if (!payload.ok || !payload.snapshot) {
           refs.lastTelemetryAt.textContent = 'telemetry: waiting';
+          monitorVideoStall();
           return;
         }
 
@@ -726,21 +819,23 @@
         refs.streamSummary.textContent = `${snapshot.pipeline || snapshot.pipeline_name || 'pipeline'} | runtime ${formatRuntime(snapshot.runtime_sec)} | ${snapshot.primary_url || 'no-url'}`;
         renderTargets(snapshot);
         renderLidar(snapshot);
+        monitorVideoStall();
       } catch (error) {
         console.error(error);
         refs.lastTelemetryAt.textContent = 'telemetry: error';
+        monitorVideoStall();
       }
     }
 
     async function bootstrap() {
       await loadConfig();
-      refs.connectBtn.addEventListener('click', connect);
-      refs.disconnectBtn.addEventListener('click', () => disconnect(true));
+      refs.connectBtn.addEventListener('click', () => connect(false));
+      refs.disconnectBtn.addEventListener('click', () => disconnect(true, true));
       refs.appInput.addEventListener('change', updateQueryString);
       refs.streamInput.addEventListener('change', updateQueryString);
       state.telemetryTimer = window.setInterval(refreshTelemetry, 1000);
       refreshTelemetry();
-      connect();
+      connect(false);
     }
 
     bootstrap().catch((error) => {

@@ -65,6 +65,11 @@ python3 tools/diagnostics/analyze_tracking_metrics.py --glob '/tmp/rk3588_pseudo
 ./scripts/run_phasec_suite.sh /dev/video0 640 480 75 reports/phasec
 ```
 
+默认行为：
+
+- 推流协议默认 `webrtc`。
+- 默认启动 8090 Debug UI：`http://127.0.0.1:8090/?app=live&stream=camera`。
+
 说明：
 
 - 脚本会依次执行三类场景：`static_target`、`approaching_target`、`crossing_occlusion`。
@@ -78,6 +83,12 @@ python3 tools/diagnostics/analyze_tracking_metrics.py --glob '/tmp/rk3588_pseudo
 
 ```bash
 PHASEC_NO_PAUSE=1 ./scripts/run_phasec_suite.sh /dev/video0 640 480 75 reports/phasec
+```
+
+若需关闭 Debug UI，可设置：
+
+```bash
+START_DEBUG_UI=0 PHASEC_NO_PAUSE=1 ./scripts/run_phasec_suite.sh /dev/video0 640 480 75 reports/phasec
 ```
 
 ### 7) 自动验收判定（PASS/FAIL）
@@ -103,7 +114,7 @@ python3 tools/diagnostics/check_phasec_gate.py \
 
 ### 8) 指标专用脚本
 
-仅跑三场景：
+三场景测试：
 
 ```bash
 ./scripts/run_resume_three_scenarios.sh /dev/video0 640 480 75 reports/phasec
@@ -114,10 +125,22 @@ python3 tools/diagnostics/check_phasec_gate.py \
 - `reports/phasec/latest/resume_metrics_3scene.md`
 - `reports/phasec/latest/resume_metrics_3scene.json`
 
-跑“三场景 + 整体压测”并输出总摘要：
+整体压测：
 
 ```bash
-PHASE_SECONDS=75 PERF_DURATION_S=300 PERF_ROUNDS=2 ./scripts/run_resume_overall_test.sh /dev/video0 640 480
+# 半小时压力测试
+PERF_DURATION_S=1800 PERF_ROUNDS=1 ./scripts/run_resume_overall_test.sh /dev/video0 640 480
+```
+
+说明：
+
+- 默认 `RUN_THREE_SCENES=0`，只跑整体压测。
+- 若 `reports/phasec/latest/resume_metrics_3scene.json` 存在，会自动复用历史三场景指标写入总摘要。
+- 若不存在历史三场景结果，则总摘要中三场景部分标记为 `SKIPPED`。
+- 如需在本次总测中一并重跑三场景测试，可显式启用：
+
+```bash
+RUN_THREE_SCENES=1 PHASE_SECONDS=75 PERF_DURATION_S=1800 PERF_ROUNDS=1 ./scripts/run_resume_overall_test.sh /dev/video0 640 480
 ```
 
 产物：
