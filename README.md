@@ -97,7 +97,6 @@ python3 tools/diagnostics/check_phasec_gate.py --run-dir reports/phasec/latest
 ## 文档
 
 - [技术手册](docs/technical_manual.md) — 多线程架构、融合算法、跟踪算法详细设计
-- [JD 技能补全路线图](docs/jd_skill_roadmap.md) — 针对感知岗位的技能补全计划
 
 ## 目录
 

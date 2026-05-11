@@ -3,3 +3,4 @@ third_party/
 datasheets/
 reports/
 .claude/
+tools/diagnostics/__pycache__/
