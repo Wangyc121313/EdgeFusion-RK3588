@@ -64,6 +64,7 @@ struct RuntimeTelemetrySnapshot {
     double infer_ms = 0.0;
     double fusion_ms = 0.0;
     double track_ms = 0.0;
+    double mlp_ms = 0.0;
     double overlay_ms = 0.0;
     double encode_submit_ms = 0.0;
     std::uint32_t lidar_points_total = 0;

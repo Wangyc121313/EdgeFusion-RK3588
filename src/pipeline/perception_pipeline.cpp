@@ -23,6 +23,7 @@
 #include "core/data_types.hpp"
 #include "core/lidar_ring_buffer.hpp"
 #include "fusion/detection_distance_fusion.hpp"
+#include "fusion/learned_fusion_corrector.hpp"
 #include "fusion/multi_target_tracker.hpp"
 #include "fusion/sensor_fusion.hpp"
 #include "pipeline/calibration_profile.hpp"
@@ -463,6 +464,29 @@ int PerceptionPipeline::run() {
 	distance_fusion_cfg.max_distance_m = config_.lidar_max_dist_m;
 	distance_fusion_cfg.window_half_deg = config_.lidar_window_half_deg;
 	DetectionDistanceFusion distance_fusion(fusion, distance_fusion_cfg);
+	LearnedFusionConfig mlp_cfg;
+	{
+		const char* mlp_env = std::getenv("RK3588_FUSION_MLP_ENABLED");
+		mlp_cfg.enabled = mlp_env != nullptr && mlp_env[0] != '\0' && mlp_env[0] != '0';
+	}
+	if (mlp_cfg.enabled) {
+		const char* blend_env = std::getenv("RK3588_FUSION_MLP_BLEND");
+		if (blend_env != nullptr && blend_env[0] != '\0') {
+			mlp_cfg.blend_weight = std::max(0.0F, std::min(1.0F, static_cast<float>(std::atof(blend_env))));
+		}
+		const char* score_env = std::getenv("RK3588_FUSION_MLP_MIN_SCORE");
+		if (score_env != nullptr && score_env[0] != '\0') {
+			mlp_cfg.min_cluster_score = static_cast<float>(std::atof(score_env));
+		}
+		const char* pts_env = std::getenv("RK3588_FUSION_MLP_MIN_POINTS");
+		if (pts_env != nullptr && pts_env[0] != '\0') {
+			mlp_cfg.min_candidate_points = std::max(1, std::atoi(pts_env));
+		}
+		std::cout << "mlp_fusion enabled: blend=" << mlp_cfg.blend_weight
+		          << " min_score=" << mlp_cfg.min_cluster_score
+		          << " min_points=" << mlp_cfg.min_candidate_points << '\n';
+	}
+	LearnedFusionCorrector mlp_corrector(fusion, mlp_cfg);
 	std::cout << "distance_fusion_mode="
 			  << (distance_fusion_cfg.use_robust_estimator ? "robust" : "legacy") << '\n';
 	MultiTargetTrackerConfig tracker_cfg;
@@ -677,6 +701,7 @@ int PerceptionPipeline::run() {
 		double preprocess_ms = 0.0;
 		double infer_ms = 0.0;
 		double fusion_ms = 0.0;
+		double mlp_ms = 0.0;
 		double track_ms = 0.0;
 		double overlay_ms = 0.0;
 		double encode_submit_ms = 0.0;
@@ -729,6 +754,13 @@ int PerceptionPipeline::run() {
 							 &fusion_diagnostics);
 		fusion_ms = std::chrono::duration<double, std::milli>(
 			std::chrono::steady_clock::now() - fusion_begin).count();
+
+		if (mlp_cfg.enabled) {
+			const auto mlp_begin = std::chrono::steady_clock::now();
+			mlp_corrector.correct(&last_detections, &fusion_diagnostics);
+			mlp_ms = std::chrono::duration<double, std::milli>(
+				std::chrono::steady_clock::now() - mlp_begin).count();
+		}
 
 		std::vector<TrackObservation> track_observations;
 		track_observations.reserve(last_detections.size());
@@ -1012,6 +1044,7 @@ int PerceptionPipeline::run() {
 			snapshot.infer_ms = infer_ms;
 			snapshot.fusion_ms = fusion_ms;
 			snapshot.track_ms = track_ms;
+			snapshot.mlp_ms = mlp_ms;
 			snapshot.overlay_ms = overlay_ms;
 			snapshot.encode_submit_ms = encode_submit_ms;
 			snapshot.lidar_points_total = has_lidar_cloud ? static_cast<std::uint32_t>(matched_cloud.points.size()) : 0U;

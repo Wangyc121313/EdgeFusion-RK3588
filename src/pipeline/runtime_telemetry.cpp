@@ -113,6 +113,7 @@ void RuntimeTelemetrySink::writeSnapshot(const RuntimeTelemetrySnapshot& snapsho
          << "\"infer_ms\":" << snapshot.infer_ms << ','
          << "\"fusion_ms\":" << snapshot.fusion_ms << ','
          << "\"track_ms\":" << snapshot.track_ms << ','
+         << "\"mlp_ms\":" << snapshot.mlp_ms << ','
          << "\"overlay_ms\":" << snapshot.overlay_ms << ','
          << "\"encode_submit_ms\":" << snapshot.encode_submit_ms << ','
          << "\"lidar_points_total\":" << snapshot.lidar_points_total << ','
